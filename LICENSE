@@ -22,6 +22,6 @@ SOFTWARE.
 
 ---
 
-Modifications in this repository, the emacs-plus-local@30 formula and the
+Modifications in this repository, the emacs-plusplus@30 formula and the
 patches emacs-30.2-ebadf-retry-v3 and emacs-30.2-thread-last-error, are
 Copyright (c) 2026 cosmicz and released under the same MIT License.

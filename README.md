@@ -1,4 +1,4 @@
-# homebrew-emacs-local
+# homebrew-emacs-plusplus
 
 A local fork of [d12frosted/homebrew-emacs-plus](https://github.com/d12frosted/homebrew-emacs-plus)
 that builds GNU Emacs 30.2 for macOS with two additional source patches
@@ -25,11 +25,11 @@ SHA-256.
 ## Install
 
 ```sh
-brew tap cosmic/emacs-local https://github.com/cosmicz/homebrew-emacs-local
-brew install --build-from-source cosmic/emacs-local/emacs-plus-local@30
+brew tap cosmicz/emacs-plusplus
+brew install --build-from-source cosmicz/emacs-plusplus/emacs-plusplus@30
 ```
 
-The formula name `emacs-plus-local@30` keeps the install separate from
+The formula name `emacs-plusplus@30` keeps the install separate from
 `emacs-plus@30`, so both kegs can coexist and the old one remains the
 rollback.  Options are the same as the upstream `emacs-plus@30` formula.
 
@@ -42,3 +42,7 @@ ABI `30.2-8ac2a0dd`).  The block in `install` that rebuilds the
 dependency environment exists because that build ran with
 `--ignore-dependencies` against the already installed dependency set; it
 is inert in a normal `brew install`.
+
+`Formula/emacs-plus-local@30.rb` is the name the live keg was built under
+and stays until the next build is made from `emacs-plusplus@30`; it will be
+removed then.

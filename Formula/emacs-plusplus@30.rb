@@ -1,0 +1,393 @@
+require_relative "../Library/EmacsBase"
+
+class EmacsPlusplusAT30 < EmacsBase
+  init "30.2", sha256: "b3f36f18a6dd2715713370166257de2fae01f9d38cfe878ced9b1e6ded5befd9", branch: "emacs-30"
+
+  desc "GNU Emacs text editor"
+  homepage "https://www.gnu.org/software/emacs/"
+
+  #
+  # Options
+  #
+
+  # Opt-out
+  option "without-cocoa", "Build a non-Cocoa version of Emacs"
+
+  # Opt-in
+  option "with-ctags", "Don't remove the ctags executable that Emacs provides"
+  option "with-x11", "Experimental: build with x11 support"
+  option "with-debug", "Build with debug symbols and debugger friendly optimizations"
+  option "with-xwidgets", "Experimental: build with xwidgets support"
+  option "with-compress-install", "Build with compressed install optimization"
+
+  #
+  # Dependencies
+  #
+
+  depends_on "make" => :build
+  depends_on "autoconf" => :build
+  depends_on "gnu-sed" => :build
+  depends_on "gnu-tar" => :build
+  depends_on "grep" => :build
+  depends_on "coreutils" => :build
+  depends_on "pkg-config" => :build
+  depends_on "texinfo" => :build
+  depends_on "xz" => :build
+  depends_on "m4" => :build
+  depends_on "sqlite" => :build
+  depends_on "gnutls"
+  depends_on "librsvg"
+  depends_on "little-cms2"
+  depends_on "tree-sitter@0.25"
+  depends_on "webp"
+  depends_on "imagemagick" => :optional
+  depends_on "dbus" => :optional
+  depends_on "mailutils" => :optional
+  # `libgccjit` and `gcc` are required when Emacs compiles `*.elc` files asynchronously (JIT)
+  depends_on "libgccjit"
+  depends_on "gcc"
+
+  depends_on "gmp" => :build
+  depends_on "libjpeg" => :build
+  depends_on "zlib" => :build
+
+  if build.with? "x11"
+    depends_on "libxaw"
+    depends_on "freetype" => :recommended
+    depends_on "fontconfig" => :recommended
+  end
+
+  #
+  # Incompatible options
+  #
+
+  if build.with?("xwidgets") && !((build.with? "cocoa") && (build.without? "x11"))
+    odie "--with-xwidgets is not available when building --with-x11"
+  end
+
+  #
+  # Patches
+  #
+
+  local_patch "fix-window-role", sha: "1f8423ea7e6e66c9ac6dd8e37b119972daa1264de00172a24a79a710efcb8130"
+  local_patch "system-appearance", sha: "9eb3ce80640025bff96ebaeb5893430116368d6349f4eb0cb4ef8b3d58477db6"
+  local_patch "round-undecorated-frame", sha: "7e39e694ce9dca50db72c09be442c1278d1900d69c2402f289742aeae8ea4c3e"
+  local_patch "fix-macos-tahoe-scrolling", sha: "847a38346c5d917c83ba8c28d63c85006e51e2c0e08c2a2343b3ec9a3f40e380"
+  local_patch "fix-ns-x-colors", sha: "9e5d3e26a8d388d3a000b697d582769645ca93ad597b4113744deba4b89a8b9e"
+  # organa-abog: the two private fixes. cw2c revision 3 (ACCEPT PASS 12:50) and the hphj candidate (REVIEW PASS 13:19).
+  local_patch "emacs-30.2-ebadf-retry-v3", sha: "2bf0a7619646c7bd317560abbd00fbbda650cf9575f2152cfeed7063ea24b67e"
+  local_patch "emacs-30.2-thread-last-error", sha: "ef5579bc16f51189e2defc4ab7e910dc421a91b5e0ae3b46a5c8780e53abdeba"
+
+  #
+  # Install
+  #
+
+  def install
+    # organa-abog: dependency environment under --ignore-dependencies.
+    # Build#initialize (Library/Homebrew/build.rb, "return if
+    # args.ignore_dependencies?") leaves the dependency list empty, so
+    # Build#install hands superenv no dependencies and the build sees no
+    # dependency PATH, pkg-config, include or library paths (2026-11-05
+    # 18:58: ./autogen.sh found no autoconf).  Without the flag, Homebrew
+    # treats an installed-but-outdated dependency as unsatisfied
+    # (dependency.rb Dependency#installed?) and upgrades it, which this
+    # build must not do.  Expanding the declared dependencies by the
+    # CURRENT core definitions is not the installed world either
+    # (2026-11-05 19:48: harfbuzz 15.1.0 names icu4c@79, while the
+    # installed harfbuzz 14.3.0 links icu4c@78).  Lead ruling (arc-orgx
+    # 19:51): build against the EXISTING installed dependency set.  So:
+    # this formula's declared dependencies as resolved by the selected
+    # options (Build#expand_deps' option, test and implicit rules), each
+    # one installed; for every runtime one, the runtime closure Homebrew
+    # recorded in its INSTALL_RECEIPT.json when it was installed
+    # (Tab#runtime_dependencies: what its keg is linked against);
+    # build-only dependencies kept without their own dependencies, as
+    # Build#expand_deps' KEEP_BUT_PRUNE_RECURSIVE_DEPS does.  Then exactly
+    # Build#install's superenv calls.  Nothing is installed or upgraded: a
+    # receipt-named dependency without an opt prefix, or a runtime
+    # dependency without a receipt, stops the build.
+    if ENV.respond_to?(:deps=) && ENV.deps.empty?
+      members = {}
+      add = lambda do |name, runtime|
+        f = begin
+          Formulary.factory(name.to_s)
+        rescue FormulaUnavailableError => e
+          odie "organa-abog: dependency #{name} has no formula: #{e.message}"
+        end
+        odie "organa-abog: dependency #{f.full_name} is not installed: no #{f.opt_prefix}" unless f.opt_prefix.directory?
+        entry = (members[f.full_name] ||= [f, false])
+        entry[1] = true if runtime
+        f
+      end
+      deps.reject { |d| d.prune_from_option?(build) || (d.test? && !d.build?) || d.implicit? }.each do |d|
+        f = add.call(d.name, !d.build?)
+        next if d.build?
+        receipt = Tab.for_formula(f).runtime_dependencies
+        odie "organa-abog: #{f.full_name} has no runtime_dependencies receipt" unless receipt.is_a?(Array)
+        receipt.each { |r| add.call(r.is_a?(Hash) ? r["full_name"] : r, true) }
+      end
+      formula_deps = members.values.map(&:first)
+      ENV.keg_only_deps = formula_deps.select(&:keg_only?)
+      ENV.deps = formula_deps
+      ENV.run_time_deps = members.values.select(&:last).map(&:first)
+      ENV.setup_build_environment(formula: self, debug_symbols: build.with?("debug"))
+      ohai "organa-abog dependency environment (#{formula_deps.size} formulae from installed receipts, " \
+           "#{ENV.keg_only_deps.size} keg-only)",
+           formula_deps.map { |f| "#{f.full_name}=#{f.opt_prefix.realpath.basename}" }.join(" ")
+    end
+
+    # Check icon options are not used with non-Cocoa builds
+    check_icon_compatibility
+    # Warn if revision is pinned via config or environment variable
+    check_pinned_revision(30)
+    # Validate build.yml configuration early to fail fast
+    validate_custom_config
+
+    args = %W[
+      --disable-dependency-tracking
+      --disable-silent-rules
+      --enable-locallisppath=#{HOMEBREW_PREFIX}/share/emacs/site-lisp
+      --infodir=#{info}/emacs
+      --prefix=#{prefix}
+      --with-native-compilation=aot
+    ]
+
+    args << "--with-xml2"
+    args << "--with-gnutls"
+
+    args << "--without-compress-install" if build.without? "compress-install"
+
+    # Necessary for libgccjit library discovery
+    gcc_ver = Formula["gcc"].any_installed_version
+    gcc_ver_major = gcc_ver.major
+    gcc_lib="#{HOMEBREW_PREFIX}/lib/gcc/#{gcc_ver_major}"
+
+    # Enable debug symbols in Homebrew's superenv
+    ENV.set_debug_symbols if build.with? "debug"
+
+    # Build CFLAGS - pass to configure for includes and defines
+    # Note: Homebrew's superenv handles optimization (-O2) and debug (-g) flags
+    cflags = []
+    cflags << "-DFD_SETSIZE=10000"
+    cflags << "-DDARWIN_UNLIMITED_SELECT"
+    cflags << "-I#{Formula["sqlite"].include}"
+    cflags << "-I#{Formula["gcc"].include}"
+    cflags << "-I#{Formula["libgccjit"].include}"
+    args << "CFLAGS=#{cflags.join(" ")}"
+
+    ENV.append "LDFLAGS", "-L#{Utils::Path.formula_opt_lib("sqlite")}"
+    ENV.append "LDFLAGS", "-L#{gcc_lib}"
+    ENV.append "LDFLAGS", "-Wl,-rpath,#{gcc_lib}"
+    # libgccjit's JIT linker needs GCC runtime libraries during configure and AOT compilation.
+    ENV.prepend_path "LIBRARY_PATH", build_library_path
+
+    args <<
+      if build.with? "dbus"
+        "--with-dbus"
+      else
+        "--without-dbus"
+      end
+
+    # Note that if ./configure is passed --with-imagemagick but can't find the
+    # library it does not fail but imagemagick support will not be available.
+    # See: https://debbugs.gnu.org/cgi/bugreport.cgi?bug=24455
+    args <<
+      if build.with?("imagemagick")
+        "--with-imagemagick"
+      else
+        "--without-imagemagick"
+      end
+
+    if build.with? "imagemagick"
+      imagemagick_lib_path = Utils::Path.formula_opt_lib("imagemagick")/"pkgconfig"
+      ohai "ImageMagick PKG_CONFIG_PATH: ", imagemagick_lib_path
+      ENV.prepend_path "PKG_CONFIG_PATH", imagemagick_lib_path
+    end
+
+    args << "--with-modules"
+    args << "--with-rsvg"
+    args << "--with-webp"
+    args << "--without-pop" if build.with? "mailutils"
+    args << "--with-xwidgets" if build.with? "xwidgets"
+
+    system "./autogen.sh"
+
+    # Apply custom patches from build.yml
+    apply_custom_patches
+
+    # Preload native-comp driver options into the dump (works with -Q)
+    write_site_init
+
+    if (build.with? "cocoa") && (build.without? "x11")
+      args << "--with-ns" << "--disable-ns-self-contained"
+
+      system "./configure", *args
+
+      # Disable aligned_alloc on Mojave. See issue: https://github.com/daviderestivo/homebrew-emacs-head/issues/15
+      if OS.mac? && MacOS.version <= :mojave
+        ohai "Force disabling of aligned_alloc on macOS <= Mojave"
+        configure_h_filtered = File.read("src/config.h")
+                                   .gsub("#define HAVE_ALIGNED_ALLOC 1", "#undef HAVE_ALIGNED_ALLOC")
+                                   .gsub("#define HAVE_DECL_ALIGNED_ALLOC 1", "#undef HAVE_DECL_ALIGNED_ALLOC")
+                                   .gsub("#define HAVE_ALLOCA 1", "#undef HAVE_ALLOCA")
+                                   .gsub("#define HAVE_ALLOCA_H 1", "#undef HAVE_ALLOCA_H")
+        File.write("src/config.h", configure_h_filtered)
+      end
+
+      system "gmake"
+
+      # Generate dSYM bundle for debugging BEFORE install (clang stores symbols
+      # in .o files, and dsymutil needs them to extract debug info)
+      system "dsymutil", "nextstep/Emacs.app/Contents/MacOS/Emacs" if build.with? "debug"
+
+      system "gmake", "install"
+
+      icons_dir = buildpath/"nextstep/Emacs.app/Contents/Resources"
+
+      # Apply custom icon from build.yml
+      apply_custom_icon(icons_dir)
+
+      # Create Emacs Client.app (AppleScript-based to handle file opening from Finder)
+      create_emacs_client_app(icons_dir)
+
+      # (prefix/"share/emacs/#{version}").install "lisp"
+      prefix.install "nextstep/Emacs.app"
+      (prefix/"Emacs.app/Contents").install "native-lisp"
+      prefix.install "nextstep/Emacs Client.app"
+
+      # inject Emacs Plus site-lisp with ns-emacs-plus-version
+      inject_emacs_plus_site_lisp(30)
+
+      # inject PATH to Info.plist
+      inject_path
+
+      # inject description for protected resources usage
+      inject_plist_extras
+
+      # Replace the symlink with one that avoids starting Cocoa.
+      # Prefer the bundle this formula built; fall back to /Applications and
+      # ~/Applications for users who moved Emacs.app there for better
+      # Spotlight integration. The fallbacks come last so an Emacs.app
+      # installed by the emacs-plus-app cask is never picked up instead of
+      # this formula's own build.
+      (bin/"emacs").unlink # Kill the existing symlink
+      (bin/"emacs").write <<~EOS
+        #!/bin/bash
+        for app in "#{prefix}/Emacs.app" "/Applications/Emacs.app" "$HOME/Applications/Emacs.app"; do
+          if [ -x "$app/Contents/MacOS/Emacs" ]; then
+            exec "$app/Contents/MacOS/Emacs" "$@"
+          fi
+        done
+        echo "Error: Emacs.app not found in #{prefix}, /Applications, or ~/Applications" >&2
+        exit 1
+      EOS
+    else
+      if build.with? "x11"
+        # These libs are not specified in xft's .pc. See:
+        # https://trac.macports.org/browser/trunk/dports/editors/emacs/Portfile#L74
+        # https://github.com/Homebrew/homebrew/issues/8156
+        ENV.append "LDFLAGS", "-lfreetype -lfontconfig"
+        args << "--with-x"
+        args << "--with-gif=no" << "--with-tiff=no" << "--with-jpeg=no"
+      else
+        args << "--without-x"
+      end
+      args << "--without-ns"
+
+      system "./configure", *args
+
+      # Disable aligned_alloc on Mojave. See issue: https://github.com/daviderestivo/homebrew-emacs-head/issues/15
+      if OS.mac? && MacOS.version <= :mojave
+        ohai "Force disabling of aligned_alloc on macOS <= Mojave"
+        configure_h_filtered = File.read("src/config.h")
+                                   .gsub("#define HAVE_ALIGNED_ALLOC 1", "#undef HAVE_ALIGNED_ALLOC")
+                                   .gsub("#define HAVE_DECL_ALIGNED_ALLOC 1", "#undef HAVE_DECL_ALIGNED_ALLOC")
+                                   .gsub("#define HAVE_ALLOCA 1", "#undef HAVE_ALLOCA")
+                                   .gsub("#define HAVE_ALLOCA_H 1", "#undef HAVE_ALLOCA_H")
+        File.write("src/config.h", configure_h_filtered)
+      end
+
+      system "gmake"
+
+      # Generate dSYM bundle for debugging BEFORE install (non-Cocoa build)
+      system "dsymutil", "src/emacs" if build.with? "debug"
+
+      system "gmake", "install"
+    end
+
+    # Follow MacPorts and don't install ctags from Emacs. This allows Vim
+    # and Emacs and ctags to play together without violence.
+    if build.without? "ctags"
+      (bin/"ctags").unlink
+      if build.with? "compress-install"
+        (man1/"ctags.1.gz").unlink
+      else
+        (man1/"ctags.1").unlink
+      end
+    end
+
+    # Launcher for post_install_steps, see EmacsBase#install_postinstall_launcher
+    install_postinstall_launcher
+  end
+
+  # Post-install setup: info manuals, custom icon from build.yml and re-signing.
+  # post_install_steps only takes literal steps, so the Ruby in Library/ runs
+  # through scripts/formula-postinstall as a `run` step, via the launcher
+  # `install` left in libexec (it knows where the tap checkout is).
+  post_install_steps do
+    run "emacs-plus-postinstall",
+        base:         :libexec,
+        args:         ["--prefix", "{{prefix}}", "--version", "{{version.major}}",
+                       "--install-info", "--apply-icon"],
+        print_stdout: true
+  end
+
+  def caveats
+    <<~EOS
+      Emacs.app and Emacs Client.app were installed to:
+        #{opt_prefix}
+
+      Formulas don't install apps into /Applications. If that is what you
+      want, the emacs-plus-app casks are the better fit, though they ship
+      Emacs 31 and newer:
+        brew install --cask emacs-plus-app
+
+      With this formula you can still put them there yourself:
+      - copy them, and after each upgrade remove the copy of Emacs.app and
+        copy it again:
+          cp -R "#{opt_prefix}/Emacs.app" /Applications/
+          cp -R "#{opt_prefix}/Emacs Client.app" /Applications/
+      - or symlink them; the links follow upgrades, but Spotlight may not
+        show them:
+          ln -s "#{opt_prefix}/Emacs.app" /Applications/
+          ln -s "#{opt_prefix}/Emacs Client.app" /Applications/
+
+      The `emacs` command always runs this formula's own Emacs.app.
+
+      Custom icons and patches can be configured via ~/.config/emacs-plus/build.yml
+      See: https://github.com/d12frosted/homebrew-emacs-plus/blob/master/community/README.md
+
+      If Emacs fails to start with "Library not loaded" errors after upgrading
+      dependencies (e.g., tree-sitter, libgccjit), reinstall emacs-plus:
+        brew reinstall emacs-plus@30
+
+      Note: installing this formula alongside an emacs-plus-app cask is not
+      supported. Both provide emacs and emacsclient in $(brew --prefix)/bin,
+      and Homebrew cannot declare a conflict between a formula and a cask.
+      Keep one or the other installed.
+
+      Report any issues to https://github.com/d12frosted/homebrew-emacs-plus
+    EOS
+  end
+
+  service do
+    run [opt_bin/"emacs", "--fg-daemon"]
+    keep_alive crashed: true
+    log_path var/"log/emacs-plus@30.stdout.log"
+    error_log_path var/"log/emacs-plus@30.stderr.log"
+  end
+
+  test do
+    assert_equal "4", shell_output("#{bin}/emacs --batch --eval=\"(print (+ 2 2))\"").strip
+  end
+end
