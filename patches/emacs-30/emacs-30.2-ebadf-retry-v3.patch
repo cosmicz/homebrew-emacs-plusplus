@@ -1,0 +1,100 @@
+--- a/src/process.c	2026-11-05 10:54:47
++++ b/src/process.c	2026-11-05 11:27:39
+@@ -5208,6 +5208,25 @@
+   waiting_for_user_input_p = data;
+ }
+ 
++/* Return true if a descriptor that wait_reading_process_output
++   still expects to wait for is not an open file descriptor.  WAIT_PROC
++   is the process the caller waits for, or NULL.  */
++static bool
++registered_descriptor_closed_p (struct Lisp_Process *wait_proc)
++{
++  int child_fd = child_signal_read_fd;
++  if (0 <= child_fd && fcntl (child_fd, F_GETFD) < 0 && errno == EBADF)
++    return true;
++  if (wait_proc && 0 <= wait_proc->infd
++      && fcntl (wait_proc->infd, F_GETFD) < 0 && errno == EBADF)
++    return true;
++  for (int fd = 0; fd <= max_desc; fd++)
++    if ((fd_callback_info[fd].flags & (FOR_READ | FOR_WRITE)) != 0
++	&& fcntl (fd, F_GETFD) < 0 && errno == EBADF)
++      return true;
++  return false;
++}
++
+ /* This is here so breakpoints can be put on it.  */
+ static void
+ wait_reading_process_output_1 (void)
+@@ -5828,7 +5847,19 @@
+ 	  if (xerrno == EINTR)
+ 	    no_avail = 1;
+ 	  else if (xerrno == EBADF)
+-	    emacs_abort ();
++	    {
++	      /* Another Lisp thread can close a descriptor that is in
++		 our wait masks while thread_select has released the
++		 global lock, for example by deleting a process.  That
++		 descriptor is no longer registered, so the masks
++		 computed on the next iteration will not contain it;
++		 just try again.  Abort only if a descriptor that is
++		 still registered is not open, which means that the
++		 bookkeeping in this file is broken.  */
++	      if (registered_descriptor_closed_p (wait_proc))
++		emacs_abort ();
++	      no_avail = 1;
++	    }
+ 	  else
+ 	    report_file_errno ("Failed select", Qnil, xerrno);
+ 	}
+--- a/test/src/process-tests.el	2026-11-05 10:54:47
++++ b/test/src/process-tests.el	2026-11-05 11:27:39
+@@ -984,6 +984,48 @@
+          (file-name-absolute-p filename)
+          (file-regular-p filename)
+          filename)))
++
++(ert-deftest process-tests/delete-process-other-thread-waiting ()
++  "Deleting a process must not abort Emacs when another thread waits.
++While a thread is blocked in `accept-process-output' with no process
++argument, its `pselect' call watches the descriptors of every process
++that is not locked to another thread.  Deleting such a process from a
++different thread closes a descriptor under that call, which on some
++systems then fails with EBADF.  Emacs used to abort on that error."
++  (skip-unless (fboundp 'make-thread))
++  (let* ((proc (make-pipe-process :name "test" :noquery t
++                                  :filter #'ignore :sentinel #'ignore))
++         ;; A fresh object.  Only the thread below can return it, and
++         ;; only after its wait has returned normally.
++         (done (list 'wait-returned))
++         (entered nil)
++         (thread (make-thread
++                  (lambda ()
++                    (setq entered t)
++                    (accept-process-output nil 1)
++                    done))))
++    (unwind-protect
++        (let ((deadline (+ (float-time) 10)))
++          (while (and (not entered) (< (float-time) deadline))
++            (thread-yield))
++          (should entered)
++          ;; The new thread holds the global lock from setting ENTERED
++          ;; until it first releases it inside select.  The delay below
++          ;; then lets it reach its long wait.  Under heavy load the
++          ;; deletion can still come first; the test then passes without
++          ;; exercising the bug, it never fails because of it.
++          (sleep-for 0.1)
++          (delete-process proc)
++          ;; `thread-join' returns the value of the thread's function.
++          ;; That is DONE only if the wait returned normally in this
++          ;; very thread; a thread that exits by a signal returns no
++          ;; value.  Errors of other threads play no part.
++          (should (eq (thread-join thread) done))
++          (should-not (process-live-p proc)))
++      (when (process-live-p proc)
++        (delete-process proc))
++      (when (thread-live-p thread)
++        (ignore-errors (thread-join thread))))))
+ 
+ ;; Bug#46284
+ (ert-deftest process-sentinel-interrupt-event ()

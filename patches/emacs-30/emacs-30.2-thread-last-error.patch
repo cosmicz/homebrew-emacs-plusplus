@@ -1,0 +1,229 @@
+--- a/doc/lispref/threads.texi
++++ b/doc/lispref/threads.texi
+@@ -140,12 +140,20 @@ the thread to exit using the following function.
+ thread exits.  Other threads can access the error form which caused
+ the thread to exit using the following function.
+ 
+-@defun thread-last-error &optional cleanup
++@defun thread-last-error &optional cleanup thread
+ This function returns the last error form recorded when a thread
+-exited due to an error.  Each thread that exits abnormally overwrites
+-the form stored by the previous thread's error with a new value, so
+-only the last one can be accessed.  If @var{cleanup} is
+-non-@code{nil}, the stored form is reset to @code{nil}.
++exited due to an error.  If @var{thread} is @code{nil} or omitted,
++each thread that exits abnormally overwrites the form stored by the
++previous thread's error with a new value, so only the last one can be
++accessed.  If @var{cleanup} is non-@code{nil}, the stored form is
++reset to @code{nil}.
++
++If @var{thread} is a thread object, this function returns the error
++form with which that thread exited, or @code{nil} if the thread is
++still alive or has exited normally.  Errors in other threads do not
++change this form, and it is kept for as long as the thread object
++itself.  If @var{cleanup} is non-@code{nil}, only the form stored for
++@var{thread} is reset to @code{nil}.
+ @end defun
+ 
+ @node Mutexes
+--- a/src/thread.c
++++ b/src/thread.c
+@@ -58,6 +58,7 @@ static union aligned_thread_state main_thread
+       .result = LISPSYM_INITIALLY (Qnil),
+       .error_symbol = LISPSYM_INITIALLY (Qnil),
+       .error_data = LISPSYM_INITIALLY (Qnil),
++      .last_error = LISPSYM_INITIALLY (Qnil),
+       .event_object = LISPSYM_INITIALLY (Qnil),
+     }};
+ 
+@@ -750,6 +751,7 @@ record_thread_error (Lisp_Object error_form)
+ static Lisp_Object
+ record_thread_error (Lisp_Object error_form)
+ {
++  current_thread->last_error = error_form;
+   last_thread_error = error_form;
+   return error_form;
+ }
+@@ -1111,15 +1113,34 @@ DEFUN ("all-threads", Fall_threads, Sall_threads, 0, 0
+   return result;
+ }
+ 
+-DEFUN ("thread-last-error", Fthread_last_error, Sthread_last_error, 0, 1, 0,
++DEFUN ("thread-last-error", Fthread_last_error, Sthread_last_error, 0, 2, 0,
+        doc: /* Return the last error form recorded by a dying thread.
+-If CLEANUP is non-nil, remove this error form from history.  */)
+-     (Lisp_Object cleanup)
++If THREAD is nil or omitted, this is the form of the thread that most
++recently exited because of an error, whichever thread that was.
++If THREAD is a thread, this is the form with which THREAD exited, or
++nil if THREAD is alive or exited normally; errors in other threads do
++not change it.
++If CLEANUP is non-nil, remove this error form from history.  With a
++THREAD, that removes only the form recorded for THREAD; without one,
++only the form that is not tied to a thread.  */)
++  (Lisp_Object cleanup, Lisp_Object thread)
+ {
+-  Lisp_Object result = last_thread_error;
++  Lisp_Object result;
+ 
+-  if (!NILP (cleanup))
+-    last_thread_error = Qnil;
++  if (NILP (thread))
++    {
++      result = last_thread_error;
++      if (!NILP (cleanup))
++	last_thread_error = Qnil;
++    }
++  else
++    {
++      CHECK_THREAD (thread);
++      struct thread_state *tstate = XTHREAD (thread);
++      result = tstate->last_error;
++      if (!NILP (cleanup))
++	tstate->last_error = Qnil;
++    }
+ 
+   return result;
+ }
+--- a/src/thread.h
++++ b/src/thread.h
+@@ -85,6 +85,13 @@ struct thread_state
+   Lisp_Object error_symbol;
+   Lisp_Object error_data;
+ 
++  /* The error form with which this thread exited, if its function
++     exited because of an error it did not handle; nil otherwise.
++     This is a record for 'thread-last-error' only.  A signal that is
++     still to be raised in the thread is in error_symbol and
++     error_data above.  */
++  Lisp_Object last_error;
++
+   /* If we are waiting for some event, this holds the object we are
+      waiting on.  */
+   Lisp_Object event_object;
+--- a/test/src/thread-tests.el
++++ b/test/src/thread-tests.el
+@@ -36,7 +36,7 @@
+ (declare-function thread--blocker "thread.c" (thread))
+ (declare-function thread-live-p "thread.c" (thread))
+ (declare-function thread-join "thread.c" (thread))
+-(declare-function thread-last-error "thread.c" (&optional cleanup))
++(declare-function thread-last-error "thread.c" (&optional cleanup thread))
+ (declare-function thread-name "thread.c" (thread))
+ (declare-function thread-signal "thread.c" (thread error-symbol data))
+ (declare-function thread-yield "thread.c" ())
+@@ -299,7 +299,114 @@
+     (should-not (thread-last-error))
+     (setq th2 (make-thread #'threads-custom "threads-custom"))
+     (should (threadp th2))))
++
++(ert-deftest threads-last-error-per-thread ()
++  "Test that each thread keeps the error form it exited with."
++  (skip-unless (featurep 'threads))
++  (let* ((payload (list 'payload))
++         (th1 (make-thread (lambda ()
++                             (signal 'wrong-type-argument (list payload)))))
++         (th2 (make-thread (lambda () (error "Second")))))
++    (while (or (thread-live-p th1) (thread-live-p th2))
++      (thread-yield))
++    (should (equal (thread-last-error nil th1)
++                   '(wrong-type-argument (payload))))
++    ;; The form is the one that was signaled, not a copy of it.
++    (should (eq (cadr (thread-last-error nil th1)) payload))
++    (should (equal (thread-last-error nil th2) '(error "Second")))
++    ;; A thread that fails later replaces only the form that is not
++    ;; tied to a thread.
++    (let ((th3 (make-thread (lambda () (error "Third")))))
++      (while (thread-live-p th3)
++        (thread-yield))
++      (should (equal (thread-last-error) '(error "Third")))
++      (should (equal (thread-last-error nil th1)
++                     '(wrong-type-argument (payload))))
++      (should (equal (thread-last-error nil th2) '(error "Second")))
++      ;; Cleanup with a thread removes the form of that thread only.
++      (should (equal (thread-last-error 'cleanup th3) '(error "Third")))
++      (should-not (thread-last-error nil th3))
++      (should (equal (thread-last-error) '(error "Third")))
++      (should (equal (thread-last-error nil th2) '(error "Second")))
++      ;; Cleanup without a thread leaves the forms of threads alone.
++      (should (equal (thread-last-error 'cleanup) '(error "Third")))
++      (should-not (thread-last-error))
++      (should (equal (thread-last-error nil th1)
++                     '(wrong-type-argument (payload))))
++      (should (equal (thread-last-error nil th2) '(error "Second"))))))
+ 
++(ert-deftest threads-last-error-normal-exit ()
++  "Test that a normal exit and a failure are told apart per thread."
++  (skip-unless (featurep 'threads))
++  (let ((ok (make-thread #'ignore))
++        (failed (make-thread (lambda () (signal 'error nil)))))
++    (while (or (thread-live-p ok) (thread-live-p failed))
++      (thread-yield))
++    ;; Neither thread function produced a value; only one of them failed.
++    (should-not (thread-last-error nil ok))
++    (should (equal (thread-last-error nil failed) '(error)))
++    ;; A live thread has no error form.
++    (should-not (thread-last-error nil (current-thread)))
++    (should-not (thread-last-error nil main-thread))
++    (thread-last-error 'cleanup)))
++
++(ert-deftest threads-last-error-wrong-type ()
++  "Test that `thread-last-error' rejects a THREAD that is not a thread."
++  (skip-unless (featurep 'threads))
++  (should-error (thread-last-error nil 'not-a-thread)
++                :type 'wrong-type-argument)
++  (should-error (thread-last-error 'cleanup "not a thread")
++                :type 'wrong-type-argument)
++  (should-error (thread-last-error nil (make-mutex))
++                :type 'wrong-type-argument))
++
++(defun threads-signal-fresh-payload (table)
++  "Signal an error whose data is a fresh object registered in TABLE.
++TABLE should be a hash table with weak keys.  Nothing but the error
++form refers to the object once this function has exited."
++  (let ((payload (list 'payload (make-string 64 ?x))))
++    (puthash payload t table)
++    (signal 'error (list payload))))
++
++(ert-deftest threads-last-error-survives-gc ()
++  "Test that a thread object keeps its error form alive."
++  (skip-unless (featurep 'threads))
++  (let* ((table (make-hash-table :test 'eq :weakness 'key))
++         (thread (make-thread
++                  (lambda () (threads-signal-fresh-payload table)))))
++    (while (thread-live-p thread)
++      (thread-yield))
++    ;; Let another failure replace the form that is not tied to a
++    ;; thread, then drop that one too.
++    (let ((other (make-thread (lambda () (error "Other")))))
++      (while (thread-live-p other)
++        (thread-yield)))
++    (should (equal (thread-last-error 'cleanup) '(error "Other")))
++    (garbage-collect)
++    ;; This is checked before the form is read back: only THREAD can
++    ;; have kept the payload alive.
++    (should (= (hash-table-count table) 1))
++    (should (equal (thread-last-error nil thread)
++                   `(error (payload ,(make-string 64 ?x)))))))
++
++(ert-deftest threads-last-error-collectible ()
++  "Test that a thread's error form can be collected once it is removed.
++The garbage collector scans the C stack conservatively, so a stale
++value there can keep the payload alive; hence the `:unstable' tag."
++  :tags '(:unstable)
++  (skip-unless (featurep 'threads))
++  (let* ((table (make-hash-table :test 'eq :weakness 'key))
++         (thread (make-thread
++                  (lambda () (threads-signal-fresh-payload table)))))
++    (while (thread-live-p thread)
++      (thread-yield))
++    (thread-last-error 'cleanup)
++    (garbage-collect)
++    (should (= (hash-table-count table) 1))
++    (thread-last-error 'cleanup thread)
++    (garbage-collect)
++    (should (= (hash-table-count table) 0))))
++
+ (ert-deftest threads-sticky-point ()
+   "Test bug #25165 with point movement in cloned buffer."
+   (skip-unless (featurep 'threads))
